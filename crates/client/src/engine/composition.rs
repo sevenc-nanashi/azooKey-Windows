@@ -83,6 +83,28 @@ impl TextServiceFactory {
             return Ok(None);
         }
 
+        // VK 1A で IME OFF
+        if VK_IME_OFF.is_pressed() {
+            return Ok(Some((
+                vec![
+                    ClientAction::EndComposition,
+                    ClientAction::SetIMEMode(InputMode::Latin),
+                ],
+                CompositionState::None,
+            )));
+        }
+
+        // VK 16 で IME ON
+        if VK_IME_ON.is_pressed() {
+            return Ok(Some((
+                vec![
+                    ClientAction::EndComposition,
+                    ClientAction::SetIMEMode(InputMode::Kana),
+                ],
+                CompositionState::None,
+            )));
+        }
+
         #[allow(clippy::let_and_return)]
         let (composition, mode) = {
             let text_service = self.borrow()?;
