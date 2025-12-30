@@ -18,7 +18,7 @@ use super::{
 use windows::Win32::{
     Foundation::WPARAM,
     UI::{
-        Input::KeyboardAndMouse::VK_CONTROL,
+        Input::KeyboardAndMouse::{VK_CONTROL, VK_LCONTROL, VK_RCONTROL},
         TextServices::{ITfComposition, ITfCompositionSink_Impl, ITfContext},
     },
 };
@@ -83,26 +83,31 @@ impl TextServiceFactory {
             return Ok(None);
         }
 
-        // VK 1A で IME OFF
-        if VK_IME_OFF.is_pressed() {
-            return Ok(Some((
-                vec![
-                    ClientAction::EndComposition,
-                    ClientAction::SetIMEMode(InputMode::Latin),
-                ],
-                CompositionState::None,
-            )));
-        }
+        // vk07 (0x07) による IME ON/OFF 切り替え
+        // AutoHotkeyから左右のCtrlキーで送信される
+        if wparam.0 == 0x07 {
+            let left_ctrl_pressed = VK_LCONTROL.is_pressed();
+            let right_ctrl_pressed = VK_RCONTROL.is_pressed();
 
-        // VK 16 で IME ON
-        if VK_IME_ON.is_pressed() {
-            return Ok(Some((
-                vec![
-                    ClientAction::EndComposition,
-                    ClientAction::SetIMEMode(InputMode::Kana),
-                ],
-                CompositionState::None,
-            )));
+            if left_ctrl_pressed {
+                // 左Ctrl = IME OFF
+                return Ok(Some((
+                    vec![
+                        ClientAction::EndComposition,
+                        ClientAction::SetIMEMode(InputMode::Latin),
+                    ],
+                    CompositionState::None,
+                )));
+            } else if right_ctrl_pressed {
+                // 右Ctrl = IME ON
+                return Ok(Some((
+                    vec![
+                        ClientAction::EndComposition,
+                        ClientAction::SetIMEMode(InputMode::Kana),
+                    ],
+                    CompositionState::None,
+                )));
+            }
         }
 
         #[allow(clippy::let_and_return)]
