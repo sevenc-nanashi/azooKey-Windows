@@ -2,7 +2,8 @@ import KanaKanjiConverterModule
 import Foundation
 import ffi
 
-@MainActor let converter = KanaKanjiConverter()
+@MainActor var dicdataStore: DicdataStore!
+@MainActor var converter: KanaKanjiConverter!
 @MainActor var composingText = ComposingText()
 
 @MainActor var execURL = URL(filePath: "")
@@ -20,12 +21,12 @@ import ffi
         requireEnglishPrediction: false,
         keyboardLanguage: .ja_JP,
         learningType: .nothing,
-        dictionaryResourceURL: execURL.appendingPathComponent("Dictionary"),
         memoryDirectoryURL: URL(filePath: "./test"),
         sharedContainerURL: URL(filePath: "./test"),
         textReplacer: .init {
             return execURL.appendingPathComponent("EmojiDictionary").appendingPathComponent("emoji_all_E15.1.txt")
         },
+        specialCandidateProviders: nil,
         // zenzai
         zenzaiMode: config["enable"] as! Bool ? .on(
             weight: execURL.appendingPathComponent("zenz.gguf"),
@@ -57,6 +58,18 @@ class SimpleComposingText {
 struct SComposingText {
     var text: UnsafeMutablePointer<CChar>
     var cursor: Int
+}
+
+// Helper to get total input count from ComposingCount for FFI interface
+func getInputCount(_ count: ComposingCount) -> Int {
+    switch count {
+    case .inputCount(let n):
+        return n
+    case .surfaceCount(let n):
+        return n
+    case .composite(let a, let b):
+        return getInputCount(a) + getInputCount(b)
+    }
 }
 
 func constructCandidateString(candidate: Candidate, hiragana: String) -> String {
@@ -125,6 +138,11 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
 
     load_config()
 
+    // Initialize DicdataStore and KanaKanjiConverter with new API
+    let dictionaryURL = execURL.appendingPathComponent("Dictionary")
+    dicdataStore = DicdataStore(dictionaryURL: dictionaryURL, preloadDictionary: true)
+    converter = KanaKanjiConverter(dicdataStore: dicdataStore)
+
     composingText.insertAtCursorPosition("a", inputStyle: .roman2kana)
     converter.requestCandidates(composingText, options: getOptions())
     composingText = ComposingText()
@@ -157,7 +175,6 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
     offset: Int32,
     cursorPtr: UnsafeMutablePointer<Int>
 ) -> UnsafeMutablePointer<CChar> {
-    let previousCursor = composingText.convertTargetCursorPosition
     let cursor = composingText.moveCursorFromCursorPosition(count: Int(offset))
     print("offset: \(offset), cursor: \(cursor)")
 
@@ -291,13 +308,13 @@ func to_list_pointer(_ list: [FFICandidate]) -> UnsafeMutablePointer<UnsafeMutab
 
         let text = strdup(constructCandidateString(candidate: candidate, hiragana: hiragana))
         let hiragana = strdup(hiragana)
-        let correspondingCount = candidate.correspondingCount
+        let composingCount = candidate.composingCount
 
         var afterComposingText = composingText
-        afterComposingText.prefixComplete(correspondingCount: correspondingCount)
+        afterComposingText.prefixComplete(composingCount: composingCount)
         let subtext = strdup(afterComposingText.convertTarget)
 
-        result.append(FFICandidate(text: text, subtext: subtext, hiragana: hiragana, correspondingCount: Int32(correspondingCount)))
+        result.append(FFICandidate(text: text, subtext: subtext, hiragana: hiragana, correspondingCount: Int32(getInputCount(composingCount))))
     }
 
     lengthPtr.pointee = result.count
@@ -310,7 +327,7 @@ func to_list_pointer(_ list: [FFICandidate]) -> UnsafeMutablePointer<UnsafeMutab
     offset: Int32
 ) -> UnsafeMutablePointer<CChar>  {
     var afterComposingText = composingText
-    afterComposingText.prefixComplete(correspondingCount: Int(offset))
+    afterComposingText.prefixComplete(composingCount: .inputCount(Int(offset)))
     composingText = afterComposingText
 
     return _strdup(composingText.convertTarget)!
