@@ -368,7 +368,11 @@ impl TextServiceFactory {
             .context("ipc_service is None")?;
         let mut transition = transition;
 
-        self.update_context(&preview)?;
+        // Skip update_context to reduce RequestEditSession calls
+        // Qt apps crash when multiple RequestEditSession calls happen in rapid succession
+        // update_context is used for surrounding text context (non-essential)
+        // TODO: Re-enable for non-Qt apps if needed
+        // self.update_context(&preview)?;
 
         for action in actions {
             match action {

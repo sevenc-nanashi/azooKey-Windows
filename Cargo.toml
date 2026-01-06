@@ -9,3 +9,11 @@ members = [
   "crates/launcher",
   "frontend/src-tauri"
 ]
+
+# Prevent undefined behavior from panic unwinding across FFI boundaries
+# TSF calls into this DLL from C++ code, so panics must abort instead of unwind
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

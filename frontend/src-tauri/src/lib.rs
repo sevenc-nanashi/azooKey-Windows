@@ -7,15 +7,33 @@ use std::{path::PathBuf, sync::Mutex};
 #[derive(Debug)]
 pub struct AppState {
     settings: Mutex<AppConfig>,
-    ipc: ipc::IPCService,
+    ipc: Mutex<Option<ipc::IPCService>>,
 }
 
 impl AppState {
     fn new() -> Self {
         AppState {
             settings: Mutex::new(AppConfig::new()),
-            ipc: ipc::IPCService::new().unwrap(),
+            ipc: Mutex::new(None), // Lazy initialization - connect only when needed
         }
+    }
+
+    /// Get or create IPC connection. Returns None if connection fails.
+    fn get_ipc(&self) -> Option<ipc::IPCService> {
+        let mut ipc_guard = self.ipc.lock().ok()?;
+        if ipc_guard.is_none() {
+            // Try to connect
+            match ipc::IPCService::new() {
+                Ok(service) => {
+                    *ipc_guard = Some(service);
+                }
+                Err(e) => {
+                    eprintln!("Failed to connect to server: {}", e);
+                    return None;
+                }
+            }
+        }
+        ipc_guard.clone()
     }
 }
 
@@ -31,12 +49,19 @@ fn get_config(state: tauri::State<AppState>) -> AppConfig {
 }
 
 #[tauri::command]
-fn update_config(state: tauri::State<AppState>, new_config: AppConfig) {
-    let mut config = state.settings.lock().unwrap();
+fn update_config(state: tauri::State<AppState>, new_config: AppConfig) -> Result<(), String> {
+    let mut config = state.settings.lock().map_err(|e| e.to_string())?;
     *config = new_config;
     config.write();
 
-    state.ipc.clone().update_config().unwrap();
+    // Try to notify server of config update (non-fatal if server not running)
+    if let Some(mut ipc) = state.get_ipc() {
+        if let Err(e) = ipc.update_config() {
+            eprintln!("Failed to notify server of config update: {}", e);
+            // Don't fail - config was saved successfully
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
