@@ -23,9 +23,22 @@ pub struct ZenzaiConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct DictionaryEntry {
+    pub word: String,    // The word to register (kanji/katakana)
+    pub reading: String, // The reading (hiragana)
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct DictionaryConfig {
+    pub entries: Vec<DictionaryEntry>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AppConfig {
     pub version: String,
     pub zenzai: ZenzaiConfig,
+    #[serde(default)]
+    pub dictionary: DictionaryConfig,
 }
 
 impl Default for AppConfig {
@@ -37,6 +50,7 @@ impl Default for AppConfig {
                 profile: "".to_string(),
                 backend: "cpu".to_string(),
             },
+            dictionary: DictionaryConfig::default(),
         }
     }
 }

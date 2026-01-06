@@ -11,6 +11,9 @@ import ffi
     "profile": "",
 ]
 
+// User dictionary entries: [reading: [words]]
+@MainActor var userDictionary: [String: [String]] = [:]
+
 @MainActor func getOptions(context: String = "") -> ConvertRequestOptions {
     return ConvertRequestOptions(
         requireJapanesePrediction: true,
@@ -76,18 +79,34 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
 @MainActor public func load_config() {
     if let appDataPath = ProcessInfo.processInfo.environment["APPDATA"] {
         let settingsPath = URL(filePath: appDataPath).appendingPathComponent("Azookey/settings.json")
-        
+
         do {
             let data = try Data(contentsOf: settingsPath)
-            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let zenzaiDict = json["zenzai"] as? [String: Any] {
-                
-                if let enableValue = zenzaiDict["enable"] as? Bool {
-                    config["enable"] = enableValue
+            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                // Load Zenzai config
+                if let zenzaiDict = json["zenzai"] as? [String: Any] {
+                    if let enableValue = zenzaiDict["enable"] as? Bool {
+                        config["enable"] = enableValue
+                    }
+
+                    if let profileValue = zenzaiDict["profile"] as? String {
+                        config["profile"] = profileValue
+                    }
                 }
-                
-                if let profileValue = zenzaiDict["profile"] as? String {
-                    config["profile"] = profileValue
+
+                // Load user dictionary
+                if let dictConfig = json["dictionary"] as? [String: Any],
+                   let entries = dictConfig["entries"] as? [[String: String]] {
+                    userDictionary = [:]
+                    for entry in entries {
+                        if let word = entry["word"], let reading = entry["reading"] {
+                            if userDictionary[reading] == nil {
+                                userDictionary[reading] = []
+                            }
+                            userDictionary[reading]?.append(word)
+                        }
+                    }
+                    print("Loaded \(entries.count) user dictionary entries")
                 }
             }
         } catch {
@@ -168,6 +187,34 @@ func to_list_pointer(_ list: [FFICandidate]) -> UnsafeMutablePointer<UnsafeMutab
     let converted = converter.requestCandidates(composingText, options: options)
     var result: [FFICandidate] = []
 
+    // Add user dictionary entries first (if hiragana matches a reading)
+    if let userWords = userDictionary[hiragana] {
+        for word in userWords {
+            let text = strdup(word)
+            let hiraganaPtr = strdup(hiragana)
+            let correspondingCount = Int32(hiragana.count)
+            let subtext = strdup("")
+
+            result.append(FFICandidate(text: text, subtext: subtext, hiragana: hiraganaPtr, correspondingCount: correspondingCount))
+        }
+    }
+
+    // Also check for partial matches (user dictionary reading is prefix of input)
+    for (reading, words) in userDictionary {
+        if hiragana.hasPrefix(reading) && reading != hiragana {
+            for word in words {
+                let text = strdup(word)
+                let hiraganaPtr = strdup(reading)
+                let correspondingCount = Int32(reading.count)
+                // Calculate remaining text after this reading
+                let remaining = String(hiragana.dropFirst(reading.count))
+                let subtext = strdup(remaining)
+
+                result.append(FFICandidate(text: text, subtext: subtext, hiragana: hiraganaPtr, correspondingCount: correspondingCount))
+            }
+        }
+    }
+
     for i in 0..<converted.mainResults.count {
         let candidate = converted.mainResults[i]
 
@@ -179,7 +226,7 @@ func to_list_pointer(_ list: [FFICandidate]) -> UnsafeMutablePointer<UnsafeMutab
         afterComposingText.prefixComplete(correspondingCount: correspondingCount)
         let subtext = strdup(afterComposingText.convertTarget)
 
-        result.append(FFICandidate(text: text, subtext: subtext, hiragana: hiragana, correspondingCount: Int32(correspondingCount)))        
+        result.append(FFICandidate(text: text, subtext: subtext, hiragana: hiragana, correspondingCount: Int32(correspondingCount)))
     }
 
     lengthPtr.pointee = result.count
