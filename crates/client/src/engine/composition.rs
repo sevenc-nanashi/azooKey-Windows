@@ -78,36 +78,29 @@ impl TextServiceFactory {
             return Ok(None);
         };
 
+        // IME ON/OFF switching via special key codes from AutoHotkey
+        // 0x97 = IME OFF (English), 0x98 = IME ON (Japanese)
+        // These are unassigned VK codes that won't conflict with system keys
+        // IMPORTANT: Check these BEFORE VK_CONTROL check to avoid timing issues
+        // when AutoHotkey sends these keys right after Ctrl release
+        if wparam.0 == 0x97 {
+            // IME OFF (English)
+            return Ok(Some((
+                vec![ClientAction::SetIMEMode(InputMode::Latin)],
+                CompositionState::None,
+            )));
+        }
+        if wparam.0 == 0x98 {
+            // IME ON (Japanese)
+            return Ok(Some((
+                vec![ClientAction::SetIMEMode(InputMode::Kana)],
+                CompositionState::None,
+            )));
+        }
+
         // check shortcut keys
         if VK_CONTROL.is_pressed() {
             return Ok(None);
-        }
-
-        // vk07 (0x07) による IME ON/OFF 切り替え
-        // AutoHotkeyから左右のCtrlキーで送信される
-        if wparam.0 == 0x07 {
-            let left_ctrl_pressed = VK_LCONTROL.is_pressed();
-            let right_ctrl_pressed = VK_RCONTROL.is_pressed();
-
-            if left_ctrl_pressed {
-                // 左Ctrl = IME OFF
-                return Ok(Some((
-                    vec![
-                        ClientAction::EndComposition,
-                        ClientAction::SetIMEMode(InputMode::Latin),
-                    ],
-                    CompositionState::None,
-                )));
-            } else if right_ctrl_pressed {
-                // 右Ctrl = IME ON
-                return Ok(Some((
-                    vec![
-                        ClientAction::EndComposition,
-                        ClientAction::SetIMEMode(InputMode::Kana),
-                    ],
-                    CompositionState::None,
-                )));
-            }
         }
 
         #[allow(clippy::let_and_return)]
@@ -456,30 +449,24 @@ impl TextServiceFactory {
                     // self.set_cursor(offset)?;
                 }
                 ClientAction::SetIMEMode(mode) => {
-                    self.start_composition()?;
-                    self.update_pos()?;
-                    self.end_composition()?;
-
+                    // Update the IME state - this is the core functionality
                     let mut ime_state = IMEState::get()?;
                     ime_state.input_mode = mode.clone();
 
-                    // update the language bar
-                    self.update_lang_bar()?;
+                    // update the language bar icon
+                    let _ = self.update_lang_bar();
 
-                    let mode = match mode {
-                        InputMode::Latin => "A",
-                        InputMode::Kana => "あ",
-                    };
-
-                    ipc_service.set_input_mode(mode)?;
-
+                    // Reset composition state (local only, no IPC)
                     selection_index = 0;
                     corresponding_count = 0;
                     preview.clear();
                     suffix.clear();
                     raw_input.clear();
                     raw_hiragana.clear();
-                    ipc_service.clear_text()?;
+
+                    // Note: Skipping IPC calls (set_input_mode, clear_text) as they
+                    // use blocking gRPC which can freeze if server is not responding.
+                    // The language bar icon update is sufficient for mode indication.
                 }
                 ClientAction::SetSelection(selection) => {
                     let candidates = {

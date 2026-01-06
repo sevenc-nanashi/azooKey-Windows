@@ -7,3 +7,10 @@ logs/*
 *.gguf
 *.dll
 *.lib
+
+llama_cpu
+llama_cuda
+llama_vulkan
+.claude/*
+.serena
+upstream-release/*
