@@ -215,6 +215,77 @@ func to_list_pointer(_ list: [FFICandidate]) -> UnsafeMutablePointer<UnsafeMutab
         }
     }
 
+    // Date/time conversion using Calendar components (no DateFormatter)
+    let dateKeywords = ["きょう", "あした", "きのう", "いま", "にちじ"]
+    if dateKeywords.contains(hiragana) {
+        let cal = Calendar.current
+        let now = Date()
+        var dateStrings: [String] = []
+
+        // Japanese weekday names (Sunday=1 in Calendar)
+        let weekdays = ["", "日", "月", "火", "水", "木", "金", "土"]
+
+        switch hiragana {
+        case "きょう":
+            let year = cal.component(.year, from: now)
+            let month = cal.component(.month, from: now)
+            let day = cal.component(.day, from: now)
+            let weekday = weekdays[cal.component(.weekday, from: now)]
+            dateStrings.append("\(year)年\(month)月\(day)日")
+            dateStrings.append("\(month)月\(day)日(\(weekday))")
+            dateStrings.append("\(year)年\(month)月\(day)日(\(weekday))")
+            dateStrings.append("\(year)/\(String(format: "%02d", month))/\(String(format: "%02d", day))")
+            dateStrings.append("\(month)月\(day)日")
+        case "あした":
+            if let tomorrow = cal.date(byAdding: .day, value: 1, to: now) {
+                let year = cal.component(.year, from: tomorrow)
+                let month = cal.component(.month, from: tomorrow)
+                let day = cal.component(.day, from: tomorrow)
+                let weekday = weekdays[cal.component(.weekday, from: tomorrow)]
+                dateStrings.append("\(year)年\(month)月\(day)日")
+                dateStrings.append("\(month)月\(day)日(\(weekday))")
+                dateStrings.append("\(year)年\(month)月\(day)日(\(weekday))")
+                dateStrings.append("\(year)/\(String(format: "%02d", month))/\(String(format: "%02d", day))")
+                dateStrings.append("\(month)月\(day)日")
+            }
+        case "きのう":
+            if let yesterday = cal.date(byAdding: .day, value: -1, to: now) {
+                let year = cal.component(.year, from: yesterday)
+                let month = cal.component(.month, from: yesterday)
+                let day = cal.component(.day, from: yesterday)
+                let weekday = weekdays[cal.component(.weekday, from: yesterday)]
+                dateStrings.append("\(year)年\(month)月\(day)日")
+                dateStrings.append("\(month)月\(day)日(\(weekday))")
+                dateStrings.append("\(year)年\(month)月\(day)日(\(weekday))")
+                dateStrings.append("\(year)/\(String(format: "%02d", month))/\(String(format: "%02d", day))")
+                dateStrings.append("\(month)月\(day)日")
+            }
+        case "いま":
+            let hour = cal.component(.hour, from: now)
+            let minute = cal.component(.minute, from: now)
+            dateStrings.append("\(String(format: "%02d", hour)):\(String(format: "%02d", minute))")
+            dateStrings.append("\(hour)時\(minute)分")
+        case "にちじ":
+            let year = cal.component(.year, from: now)
+            let month = cal.component(.month, from: now)
+            let day = cal.component(.day, from: now)
+            let hour = cal.component(.hour, from: now)
+            let minute = cal.component(.minute, from: now)
+            dateStrings.append("\(year)年\(month)月\(day)日 \(String(format: "%02d", hour)):\(String(format: "%02d", minute))")
+        default:
+            break
+        }
+
+        for dateStr in dateStrings {
+            result.append(FFICandidate(
+                text: strdup(dateStr),
+                subtext: strdup(""),
+                hiragana: strdup(hiragana),
+                correspondingCount: Int32(hiragana.count)
+            ))
+        }
+    }
+
     for i in 0..<converted.mainResults.count {
         let candidate = converted.mainResults[i]
 
