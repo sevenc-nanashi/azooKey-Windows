@@ -9,7 +9,7 @@ use crate::extension::StringExt as _;
 use crate::globals::DllModule;
 use crate::tracing_chrome::{ChromeLayerBuilder, EventOrSpan};
 
-const LOG_FOLDER: &str = "D:/azookey-windows/logs";
+const LOG_FOLDER: &str = "G:/Projects/azooKey-Windows/logs";
 
 pub struct StringVisitor<'a> {
     string: &'a mut String,
@@ -25,10 +25,11 @@ impl<'a> Visit for StringVisitor<'a> {
 }
 
 pub fn setup_logger() -> anyhow::Result<()> {
-    #[cfg(not(debug_assertions))]
-    {
-        return Ok(());
-    }
+    // Temporarily enable logging in release builds to debug IME crash
+    // #[cfg(not(debug_assertions))]
+    // {
+    //     return Ok(());
+    // }
     let timestamp = chrono::Local::now().format("%Y-%m-%d-%H.%M.%S");
     let path = format!("{}/{}.json", LOG_FOLDER, timestamp);
 

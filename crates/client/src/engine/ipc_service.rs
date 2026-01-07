@@ -7,10 +7,13 @@ use std::{sync::Arc, time::Duration};
 use tokio::{net::windows::named_pipe::ClientOptions, time};
 use tonic::transport::Endpoint;
 use tower::service_fn;
-use windows::Win32::Foundation::ERROR_PIPE_BUSY;
+use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY};
 
 // Timeout for IPC calls to prevent indefinite hanging when server crashes
 const IPC_TIMEOUT: Duration = Duration::from_millis(5000);
+// Maximum time to wait for server to start (retries on file not found)
+const MAX_CONNECT_RETRIES: u32 = 20;
+const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 // connect to kkc server
 #[derive(Debug, Clone)]
@@ -32,38 +35,73 @@ pub struct Candidates {
 
 impl IPCService {
     pub fn new() -> Result<Self> {
+        tracing::info!("IPCService::new() - Starting IPC connection");
         let runtime = tokio::runtime::Runtime::new()?;
 
+        tracing::info!("IPCService::new() - Connecting to azookey_server pipe...");
         let server_channel = runtime.block_on(
             Endpoint::try_from("http://[::]:50051")?.connect_with_connector(service_fn(
                 |_| async {
+                    let mut retries = 0u32;
                     let client = loop {
                         match ClientOptions::new().open(r"\\.\pipe\azookey_server") {
                             Ok(client) => break client,
-                            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) => (),
-                            Err(e) => return Err(e),
+                            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) => {
+                                tracing::debug!("azookey_server pipe busy, retrying...");
+                            }
+                            // Retry on file not found (server not ready yet)
+                            Err(e) if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND.0 as i32) => {
+                                retries += 1;
+                                tracing::debug!("azookey_server pipe not found, retry {}/{}", retries, MAX_CONNECT_RETRIES);
+                                if retries >= MAX_CONNECT_RETRIES {
+                                    tracing::error!("FAILED to connect to azookey_server pipe after {} retries: {:?}", retries, e);
+                                    return Err(e);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("FAILED to connect to azookey_server pipe: {:?} (os_error: {:?})", e, e.raw_os_error());
+                                return Err(e);
+                            }
                         }
 
-                        time::sleep(Duration::from_millis(50)).await;
+                        time::sleep(CONNECT_RETRY_DELAY).await;
                     };
+                    tracing::info!("Successfully connected to azookey_server pipe");
 
                     Ok::<_, std::io::Error>(TokioIo::new(client))
                 },
             )),
         )?;
 
+        tracing::info!("IPCService::new() - Connecting to azookey_ui pipe...");
         let ui_channel = runtime.block_on(
             Endpoint::try_from("http://[::]:50052")?.connect_with_connector(service_fn(
                 |_| async {
+                    let mut retries = 0u32;
                     let client = loop {
                         match ClientOptions::new().open(r"\\.\pipe\azookey_ui") {
                             Ok(client) => break client,
-                            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) => (),
-                            Err(e) => return Err(e),
+                            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) => {
+                                tracing::debug!("azookey_ui pipe busy, retrying...");
+                            }
+                            // Retry on file not found (server not ready yet)
+                            Err(e) if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND.0 as i32) => {
+                                retries += 1;
+                                tracing::debug!("azookey_ui pipe not found, retry {}/{}", retries, MAX_CONNECT_RETRIES);
+                                if retries >= MAX_CONNECT_RETRIES {
+                                    tracing::error!("FAILED to connect to azookey_ui pipe after {} retries: {:?}", retries, e);
+                                    return Err(e);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("FAILED to connect to azookey_ui pipe: {:?} (os_error: {:?})", e, e.raw_os_error());
+                                return Err(e);
+                            }
                         }
 
-                        time::sleep(Duration::from_millis(50)).await;
+                        time::sleep(CONNECT_RETRY_DELAY).await;
                     };
+                    tracing::info!("Successfully connected to azookey_ui pipe");
 
                     Ok::<_, std::io::Error>(TokioIo::new(client))
                 },
@@ -72,7 +110,7 @@ impl IPCService {
 
         let azookey_client = AzookeyServiceClient::new(server_channel);
         let window_client = WindowServiceClient::new(ui_channel);
-        tracing::debug!("Connected to server: {:?}", azookey_client);
+        tracing::info!("IPCService::new() - Successfully connected to both pipes");
 
         Ok(Self {
             azookey_client,

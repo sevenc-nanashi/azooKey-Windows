@@ -41,8 +41,15 @@ pub enum UserEvent {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    println!("UI started");
+
     // obtain uiaccess token
-    prepare_uiaccess_token()?;
+    println!("Preparing UIAccess token...");
+    if let Err(e) = prepare_uiaccess_token() {
+        println!("Warning: UIAccess token preparation failed: {:?}", e);
+        // Continue anyway - UIAccess is not strictly required
+    }
+    println!("UIAccess token ready");
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event()
         .with_any_thread(true)
@@ -56,14 +63,19 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // start grpc server
+    println!("Starting WindowServer gRPC server...");
     tokio::spawn(async move {
-        println!("WindowServer listening");
+        println!("WindowServer creating named pipe azookey_ui...");
         Server::builder()
             .add_service(WindowServiceServer::new(grpc_service))
             .serve_with_incoming(TonicNamedPipeServer::new("azookey_ui"))
             .await
             .expect("gRPC server failed");
     });
+
+    // Give the gRPC server time to create the pipe
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    println!("WindowServer listening on azookey_ui pipe");
 
     let event_loop_proxy = event_loop.create_proxy();
     let task_guard: Arc<Mutex<Option<JoinHandle<()>>>> = Arc::new(Mutex::new(None));

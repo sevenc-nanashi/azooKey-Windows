@@ -1,4 +1,16 @@
 use std::collections::HashMap;
+use std::io::Write;
+
+// Debug helper - write to file since println doesn't work in DLLs
+fn debug_log(msg: &str) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("G:/Projects/azooKey-Windows/logs/debug.log")
+    {
+        let _ = writeln!(file, "[{}] {}", chrono::Local::now().format("%H:%M:%S%.3f"), msg);
+    }
+}
 
 use crate::{
     engine::{ipc_service, state::IMEState},
@@ -25,21 +37,34 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
     #[macros::anyhow]
     #[tracing::instrument]
     fn Activate(&self, ptim: Option<&ITfThreadMgr>, tid: u32) -> Result<()> {
+        debug_log(&format!("Activate called with tid: {}", tid));
         tracing::debug!("Activated with tid: {tid}");
 
         // add reference to the dll instance to prevent it from being unloaded
         let mut dll_instance = DllModule::get()?;
         dll_instance.add_ref();
 
-        // initialize ipc_service
-        if let Ok(mut ipc_service) = ipc_service::IPCService::new() {
-            ipc_service.append_text("".to_string())?;
-            IMEState::get()?.ipc_service = Some(ipc_service);
-        } else {
-            // Activate() should not return an error
-            // if Activate() returns an error, the icon of the previously activated TextService will be displayed, which may confuse the user
-            tracing::error!("Failed to initialize IPC service");
-            return Ok(());
+        // initialize ipc_service (optional - continue activation even if it fails)
+        // The IPC service will be lazily reconnected when the user types
+        debug_log("Initializing IPC service...");
+        match ipc_service::IPCService::new() {
+            Ok(mut ipc_service) => {
+                debug_log("IPC service created, testing...");
+                if let Err(e) = ipc_service.append_text("".to_string()) {
+                    debug_log(&format!("IPC service test failed: {:?}", e));
+                    tracing::warn!("IPC service test failed: {:?}", e);
+                } else {
+                    IMEState::get()?.ipc_service = Some(ipc_service);
+                    debug_log("IPC service initialized successfully");
+                    tracing::debug!("IPC service initialized successfully");
+                }
+            }
+            Err(e) => {
+                // Don't return early - continue activation without IPC
+                // The IME will try to reconnect when the user types
+                debug_log(&format!("Failed to initialize IPC service: {:?}", e));
+                tracing::warn!("Failed to initialize IPC service: {:?}. Will retry on input.", e);
+            }
         }
 
         let mut text_service = self.borrow_mut()?;
@@ -49,6 +74,7 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         text_service.thread_mgr = Some(thread_mgr.clone());
 
         // initialize key event sink
+        debug_log("Setting up key event sink...");
         tracing::debug!("AdviseKeyEventSink");
 
         unsafe {
@@ -58,6 +84,7 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
                 BOOL::from(true),
             )?;
         };
+        debug_log("Key event sink setup complete");
 
         // initialize thread manager event sink
         tracing::debug!("AdviseThreadMgrEventSink");
@@ -70,6 +97,16 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
                 .cookies
                 .insert(ITfThreadMgrEventSink::IID, cookie);
         };
+
+        // Set default input mode to Kana (Japanese) when IME activates
+        // This ensures Japanese input works immediately after switching to Azookey
+        {
+            use crate::engine::input_mode::InputMode;
+            let mut ime_state = IMEState::get()?;
+            ime_state.input_mode = InputMode::Kana;
+            debug_log("Set input mode to Kana");
+            tracing::debug!("Set input mode to Kana");
+        }
 
         // initialize text layout sink
         tracing::debug!("AdviseTextLayoutSink");
@@ -116,7 +153,15 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
 
         {
             let text_service = self.borrow()?;
-            let thread_mgr = text_service.thread_mgr()?;
+            // If thread_mgr is None, Activate() was never completed successfully
+            // Just return Ok(()) without cleanup
+            let thread_mgr = match &text_service.thread_mgr {
+                Some(mgr) => mgr.clone(),
+                None => {
+                    tracing::debug!("Deactivate: thread_mgr is None, skipping cleanup");
+                    return Ok(());
+                }
+            };
 
             // end composition
             self.end_composition()?;

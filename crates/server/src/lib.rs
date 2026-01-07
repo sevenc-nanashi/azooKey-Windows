@@ -72,17 +72,23 @@ impl TonicNamedPipeServer {
         // see https://nathancorvussolis.blogspot.com/2018/05/windows-ime-security.html
 
         let name = format!("\\\\.\\pipe\\{}", path);
+        println!("Creating named pipe: {}", name);
 
         let mut security_descriptor = PSECURITY_DESCRIPTOR::default();
 
         unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                w!("D:(A;;GA;;;AC)(A;;GA;;;RC)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;BU)S:(ML;;NW;;;LW)"),
+            // WD=Everyone, AC=All App Containers, RC=Restricted Code, SY=System, BA=Admins, BU=Users
+            // ML=Low Mandatory Level - allows access from low integrity processes
+            let sd_result = ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                w!("D:(A;;GA;;;WD)(A;;GA;;;AC)(A;;GA;;;RC)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;BU)S:(ML;;NW;;;LW)"),
                 SDDL_REVISION,
                 &mut security_descriptor,
                 None,
-            )
-            .unwrap();
+            );
+            if let Err(e) = &sd_result {
+                println!("Failed to create security descriptor: {:?}", e);
+            }
+            sd_result.unwrap();
 
             let mut security_attributes = UnsafeSecurityAttributes(SECURITY_ATTRIBUTES {
                 nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -91,15 +97,30 @@ impl TonicNamedPipeServer {
             });
 
             stream! {
-                let mut server = ServerOptions::new()
+                println!("Stream started, creating pipe instance...");
+                let server_result = ServerOptions::new()
                     .first_pipe_instance(true)
                     .create_with_security_attributes_raw(
                         &name,
                         addr_of_mut!(security_attributes) as *mut c_void
-                    )?;
+                    );
+
+                let mut server = match server_result {
+                    Ok(s) => {
+                        println!("Named pipe created successfully: {}", name);
+                        s
+                    }
+                    Err(e) => {
+                        println!("Failed to create named pipe: {:?}", e);
+                        yield Err(e);
+                        return;
+                    }
+                };
 
                 loop {
+                    println!("Waiting for client connection...");
                     server.connect().await?;
+                    println!("Client connected!");
 
                     let client = TonicNamedPipeServer {
                         inner: server,

@@ -7,6 +7,24 @@ import ffi
 @MainActor var composingText = ComposingText()
 
 @MainActor var execURL = URL(filePath: "")
+@MainActor var logFileHandle: FileHandle?
+
+@MainActor func debugLog(_ message: String) {
+    let logMessage = "[\(Date())] \(message)\n"
+    print(logMessage, terminator: "")
+
+    // Also write to file
+    if let data = logMessage.data(using: .utf8) {
+        logFileHandle?.write(data)
+        try? logFileHandle?.synchronize()
+    }
+}
+
+@MainActor func initLogFile() {
+    let logPath = URL(filePath: "G:/Projects/azooKey-Windows/swift_debug.log")
+    _ = FileManager.default.createFile(atPath: logPath.path, contents: nil)
+    logFileHandle = try? FileHandle(forWritingTo: logPath)
+}
 @MainActor var config: [String : Any] = [
     "enable": false,
     "profile": "",
@@ -133,19 +151,80 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
     path: UnsafePointer<CChar>,
     use_zenzai: Bool
 ) {
+    initLogFile()
     let path = String(cString: path)
     execURL = URL(filePath: path)
+    debugLog("Initialize called, path: \(path)")
 
     load_config()
 
     // Initialize DicdataStore and KanaKanjiConverter with new API
     let dictionaryURL = execURL.appendingPathComponent("Dictionary")
-    dicdataStore = DicdataStore(dictionaryURL: dictionaryURL, preloadDictionary: true)
-    converter = KanaKanjiConverter(dicdataStore: dicdataStore)
+    debugLog("Dictionary URL: \(dictionaryURL.path)")
 
+    // Check if dictionary files exist
+    let loudsPath = dictionaryURL.appendingPathComponent("louds")
+    let cbPath = dictionaryURL.appendingPathComponent("cb")
+    let fm = FileManager.default
+    debugLog("Louds path exists: \(fm.fileExists(atPath: loudsPath.path))")
+    debugLog("CB path exists: \(fm.fileExists(atPath: cbPath.path))")
+
+    // List some files in louds directory
+    if let files = try? fm.contentsOfDirectory(atPath: loudsPath.path) {
+        debugLog("Louds directory has \(files.count) files")
+        // Show first 10 files
+        for file in files.prefix(10) {
+            debugLog("  - \(file)")
+        }
+        // Check for Japanese-named files (looking for katakana ニ which should exist)
+        let hasNiFile = files.contains { $0.hasPrefix("ニ") }
+        debugLog("Has ニ.louds files: \(hasNiFile)")
+        let japaneseFiles = files.filter { $0.first?.isLetter == true && !$0.first!.isASCII }
+        debugLog("Japanese-named files count: \(japaneseFiles.count)")
+        for file in japaneseFiles.prefix(5) {
+            debugLog("  Japanese file: \(file)")
+        }
+        // Try to access ニ.louds directly
+        let niLoudsPath = loudsPath.appendingPathComponent("ニ.louds")
+        debugLog("ニ.louds path: \(niLoudsPath.path)")
+        debugLog("ニ.louds exists: \(fm.fileExists(atPath: niLoudsPath.path))")
+    }
+
+    dicdataStore = DicdataStore(dictionaryURL: dictionaryURL, preloadDictionary: true)
+    debugLog("DicdataStore created")
+    converter = KanaKanjiConverter(dicdataStore: dicdataStore)
+    debugLog("KanaKanjiConverter created")
+
+    // Test conversion with hiragana directly
     composingText.insertAtCursorPosition("a", inputStyle: .roman2kana)
-    converter.requestCandidates(composingText, options: getOptions())
+    let testResult = converter.requestCandidates(composingText, options: getOptions())
+    debugLog("Test conversion for 'a': \(testResult.mainResults.count) results")
+    for (idx, candidate) in testResult.mainResults.prefix(3).enumerated() {
+        debugLog("  Test result[\(idx)]: text='\(candidate.text)'")
+    }
     composingText = ComposingText()
+
+    // Test with nihon (にほん) - double n to complete ん
+    var testText2 = ComposingText()
+    testText2.insertAtCursorPosition("nihonn", inputStyle: .roman2kana)
+    debugLog("Test input 'nihonn': convertTarget='\(testText2.convertTarget)'")
+    let testResult2 = converter.requestCandidates(testText2, options: getOptions())
+    debugLog("Test conversion for 'nihonn': \(testResult2.mainResults.count) results")
+    for (idx, candidate) in testResult2.mainResults.prefix(10).enumerated() {
+        debugLog("  nihonn result[\(idx)]: text='\(candidate.text)'")
+    }
+
+    // Test with direct hiragana input
+    var testText3 = ComposingText()
+    testText3.insertAtCursorPosition("にほん", inputStyle: .direct)
+    debugLog("Test direct 'にほん': convertTarget='\(testText3.convertTarget)'")
+    let testResult3 = converter.requestCandidates(testText3, options: getOptions())
+    debugLog("Test direct にほん: \(testResult3.mainResults.count) results")
+    for (idx, candidate) in testResult3.mainResults.prefix(10).enumerated() {
+        debugLog("  direct にほん result[\(idx)]: text='\(candidate.text)'")
+    }
+
+    debugLog("Initialization complete")
 }
 
 @_silgen_name("AppendText")
@@ -199,9 +278,15 @@ func to_list_pointer(_ list: [FFICandidate]) -> UnsafeMutablePointer<UnsafeMutab
 @_silgen_name("GetComposedText")
 @MainActor public func get_composed_text(lengthPtr: UnsafeMutablePointer<Int>) -> UnsafeMutablePointer<UnsafeMutablePointer<FFICandidate>?> {
     let hiragana = composingText.convertTarget
+    debugLog("GetComposedText called, hiragana: '\(hiragana)'")
     let contextString = (config["context"] as? String) ?? ""
     let options = getOptions(context: contextString)
     let converted = converter.requestCandidates(composingText, options: options)
+    debugLog("mainResults count: \(converted.mainResults.count)")
+    // Show ALL candidates to find kanji
+    for (idx, candidate) in converted.mainResults.prefix(5).enumerated() {
+        debugLog("Candidate[\(idx)]: text='\(candidate.text)'")
+    }
     var result: [FFICandidate] = []
 
     // Add user dictionary entries first (if hiragana matches a reading)

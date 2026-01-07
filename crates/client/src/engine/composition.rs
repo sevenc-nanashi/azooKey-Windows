@@ -1,4 +1,39 @@
 use std::cmp::{max, min};
+use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+// Cooldown for IPC reconnection attempts (10 seconds)
+static LAST_IPC_FAIL_TIME: AtomicU64 = AtomicU64::new(0);
+const IPC_RECONNECT_COOLDOWN_SECS: u64 = 10;
+
+fn should_try_ipc_reconnect() -> bool {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last_fail = LAST_IPC_FAIL_TIME.load(Ordering::Relaxed);
+    now.saturating_sub(last_fail) >= IPC_RECONNECT_COOLDOWN_SECS
+}
+
+fn mark_ipc_reconnect_failed() {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    LAST_IPC_FAIL_TIME.store(now, Ordering::Relaxed);
+}
+
+// Debug helper - write to file since println doesn't work in DLLs
+fn debug_log(msg: &str) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("G:/Projects/azooKey-Windows/logs/debug.log")
+    {
+        let _ = writeln!(file, "[{}] {}", chrono::Local::now().format("%H:%M:%S%.3f"), msg);
+    }
+}
 
 use crate::{
     engine::user_action::UserAction,
@@ -10,7 +45,7 @@ use super::{
     client_action::{ClientAction, SetSelectionType, SetTextType},
     full_width::{to_fullwidth, to_halfwidth},
     input_mode::InputMode,
-    ipc_service::Candidates,
+    ipc_service::{Candidates, IPCService},
     state::IMEState,
     text_util::{to_half_katakana, to_katakana},
     user_action::{Function, Navigation},
@@ -111,7 +146,11 @@ impl TextServiceFactory {
             (composition, mode)
         };
 
+        // Debug: log key event info
+        debug_log(&format!("process_key: wparam={}, mode={:?}, state={:?}", wparam.0, mode, composition.state));
+
         let action = UserAction::try_from(wparam.0)?;
+        debug_log(&format!("action: {:?}", action));
 
         let (transition, actions) = match composition.state {
             CompositionState::None => match action {
@@ -362,11 +401,41 @@ impl TextServiceFactory {
         let mut corresponding_count = composition.corresponding_count.clone();
         let mut candidates = composition.candidates.clone();
         let mut selection_index = composition.selection_index;
-        let mut ipc_service = IMEState::get()?
-            .ipc_service
-            .clone()
-            .context("ipc_service is None")?;
+        // IPC service is optional - some actions (like SetIMEMode) don't need it
+        let mut ipc_service = IMEState::get()?.ipc_service.clone();
         let mut transition = transition;
+
+        // Helper macro to get IPC service, with lazy reconnection if needed
+        // Returns Result<&mut IPCService, anyhow::Error>
+        // Uses cooldown to avoid blocking UI with repeated failed connection attempts
+        macro_rules! require_ipc {
+            () => {{
+                if ipc_service.is_none() && should_try_ipc_reconnect() {
+                    // Try lazy reconnection (only if cooldown has passed)
+                    tracing::debug!("IPC service is None, attempting lazy reconnection...");
+                    debug_log("Attempting lazy IPC reconnection...");
+                    match IPCService::new() {
+                        Ok(new_ipc) => {
+                            tracing::debug!("Lazy IPC reconnection successful");
+                            debug_log("Lazy IPC reconnection successful");
+                            ipc_service = Some(new_ipc);
+                            // Also update the global state
+                            if let Ok(mut state) = IMEState::get() {
+                                state.ipc_service = ipc_service.clone();
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Lazy IPC reconnection failed: {:?}", e);
+                            debug_log(&format!("Lazy IPC reconnection failed: {:?}", e));
+                            mark_ipc_reconnect_failed();
+                        }
+                    }
+                }
+                ipc_service
+                    .as_mut()
+                    .context("IPC service not available")
+            }};
+        }
 
         // Skip update_context to reduce RequestEditSession calls
         // Qt apps crash when multiple RequestEditSession calls happen in rapid succession
@@ -374,12 +443,24 @@ impl TextServiceFactory {
         // TODO: Re-enable for non-Qt apps if needed
         // self.update_context(&preview)?;
 
+        debug_log(&format!("handle_action: actions={:?}, ipc_available={}", actions, ipc_service.is_some()));
+
+        // Helper macro to try IPC but continue on failure (for optional IPC calls)
+        macro_rules! try_ipc {
+            ($expr:expr) => {{
+                if let Some(ref mut ipc) = ipc_service {
+                    let _ = $expr(ipc);
+                }
+            }};
+        }
+
         for action in actions {
             match action {
                 ClientAction::StartComposition => {
                     self.start_composition()?;
                     self.update_pos()?;
-                    ipc_service.show_window()?;
+                    // Show window is optional - works without server
+                    try_ipc!(|ipc: &mut IPCService| ipc.show_window());
                 }
                 ClientAction::EndComposition => {
                     self.end_composition()?;
@@ -389,64 +470,90 @@ impl TextServiceFactory {
                     suffix.clear();
                     raw_input.clear();
                     raw_hiragana.clear();
-                    ipc_service.hide_window()?;
-                    ipc_service.set_candidates(vec![])?;
-                    ipc_service.clear_text()?;
+                    // UI calls are optional - works without server
+                    try_ipc!(|ipc: &mut IPCService| ipc.hide_window());
+                    try_ipc!(|ipc: &mut IPCService| ipc.set_candidates(vec![]));
+                    try_ipc!(|ipc: &mut IPCService| ipc.clear_text());
                 }
                 ClientAction::AppendText(text) => {
                     raw_input.push_str(&text);
 
-                    let text = match mode {
+                    let fullwidth_text = match mode {
                         InputMode::Kana => to_fullwidth(text, false),
                         InputMode::Latin => text.to_string(),
                     };
 
-                    candidates = ipc_service.append_text(text.clone())?;
-                    let text = candidates.texts[selection_index as usize].clone();
-                    let sub_text = candidates.sub_texts[selection_index as usize].clone();
-                    let hiragana = candidates.hiragana.clone();
+                    // Try to get candidates from server, fall back to showing hiragana
+                    if let Ok(ipc) = require_ipc!() {
+                        candidates = ipc.append_text(fullwidth_text.clone())?;
+                        let conv_text = candidates.texts[selection_index as usize].clone();
+                        let sub_text = candidates.sub_texts[selection_index as usize].clone();
+                        let hiragana = candidates.hiragana.clone();
 
-                    corresponding_count = candidates.corresponding_count[selection_index as usize];
+                        corresponding_count = candidates.corresponding_count[selection_index as usize];
 
-                    preview = text.clone();
-                    suffix = sub_text.clone();
-                    raw_hiragana = hiragana.clone();
+                        preview = conv_text.clone();
+                        suffix = sub_text.clone();
+                        raw_hiragana = hiragana.clone();
 
-                    self.set_text(&text, &sub_text)?;
-                    ipc_service.set_candidates(candidates.texts.clone())?;
-                    ipc_service.set_selection(selection_index as i32)?;
+                        self.set_text(&conv_text, &sub_text)?;
+                        let _ = ipc.set_candidates(candidates.texts.clone());
+                        let _ = ipc.set_selection(selection_index as i32);
+                    } else {
+                        // Offline mode: just show the hiragana without conversion
+                        debug_log("Offline mode: showing hiragana without conversion");
+                        raw_hiragana.push_str(&fullwidth_text);
+                        preview = raw_hiragana.clone();
+                        suffix.clear();
+                        corresponding_count = raw_hiragana.chars().count() as i32;
+                        self.set_text(&preview, "")?;
+                    }
                 }
                 ClientAction::RemoveText => {
-                    candidates = ipc_service.remove_text()?;
-                    let empty = "".to_string();
-                    let text = candidates
-                        .texts
-                        .get(selection_index as usize)
-                        .cloned()
-                        .unwrap_or(empty.clone());
-                    let sub_text = candidates
-                        .sub_texts
-                        .get(selection_index as usize)
-                        .cloned()
-                        .unwrap_or(empty.clone());
-                    let hiragana = candidates.hiragana.clone();
-                    corresponding_count = candidates
-                        .corresponding_count
-                        .get(selection_index as usize)
-                        .cloned()
-                        .unwrap_or(0);
+                    // Try to use server, fall back to local handling
+                    if let Ok(ipc) = require_ipc!() {
+                        candidates = ipc.remove_text()?;
+                        let empty = "".to_string();
+                        let text = candidates
+                            .texts
+                            .get(selection_index as usize)
+                            .cloned()
+                            .unwrap_or(empty.clone());
+                        let sub_text = candidates
+                            .sub_texts
+                            .get(selection_index as usize)
+                            .cloned()
+                            .unwrap_or(empty.clone());
+                        let hiragana = candidates.hiragana.clone();
+                        corresponding_count = candidates
+                            .corresponding_count
+                            .get(selection_index as usize)
+                            .cloned()
+                            .unwrap_or(0);
 
-                    raw_input = raw_input
-                        .chars()
-                        .take(corresponding_count as usize)
-                        .collect();
-                    preview = text.clone();
-                    suffix = sub_text.clone();
-                    raw_hiragana = hiragana.clone();
+                        raw_input = raw_input
+                            .chars()
+                            .take(corresponding_count as usize)
+                            .collect();
+                        preview = text.clone();
+                        suffix = sub_text.clone();
+                        raw_hiragana = hiragana.clone();
 
-                    self.set_text(&text, &sub_text)?;
-                    ipc_service.set_candidates(candidates.texts.clone())?;
-                    ipc_service.set_selection(selection_index as i32)?;
+                        self.set_text(&text, &sub_text)?;
+                        let _ = ipc.set_candidates(candidates.texts.clone());
+                        let _ = ipc.set_selection(selection_index as i32);
+                    } else {
+                        // Offline mode: remove last character from hiragana
+                        debug_log("Offline mode: removing last character");
+                        let mut chars: Vec<char> = raw_hiragana.chars().collect();
+                        chars.pop();
+                        raw_hiragana = chars.into_iter().collect();
+                        raw_input = raw_input.chars().take(raw_input.chars().count().saturating_sub(1)).collect();
+                        preview = raw_hiragana.clone();
+                        suffix.clear();
+                        corresponding_count = raw_hiragana.chars().count() as i32;
+                        self.set_text(&preview, "")?;
+                    }
                 }
                 ClientAction::MoveCursor(_offset) => {
                     // TODO: I'll use azookey-kkc's composingText
@@ -489,7 +596,8 @@ impl TextServiceFactory {
                         SetSelectionType::Number(number) => *number,
                     };
 
-                    ipc_service.set_selection(selection_index as i32)?;
+                    // Selection requires server - use ? to propagate error
+                    require_ipc!()?.set_selection(selection_index as i32)?;
                     let text = texts[selection_index as usize].clone();
                     let sub_text = sub_texts[selection_index as usize].clone();
                     let hiragana = candidates.hiragana.clone();
@@ -502,19 +610,19 @@ impl TextServiceFactory {
                     self.set_text(&text, &sub_text)?;
                 }
                 ClientAction::ShrinkText(text) => {
-                    // shrink text
+                    // shrink text - requires server for conversion
                     raw_input.push_str(&text);
                     raw_input = raw_input
                         .chars()
                         .skip(corresponding_count as usize)
                         .collect();
 
-                    ipc_service.shrink_text(corresponding_count.clone())?;
+                    require_ipc!()?.shrink_text(corresponding_count.clone())?;
                     let text = match mode {
                         InputMode::Kana => to_fullwidth(text, false),
                         InputMode::Latin => text.to_string(),
                     };
-                    candidates = ipc_service.append_text(text)?;
+                    candidates = require_ipc!()?.append_text(text)?;
                     selection_index = 0;
 
                     let text = candidates.texts[selection_index as usize].clone();
@@ -527,8 +635,8 @@ impl TextServiceFactory {
                     suffix = sub_text.clone();
                     raw_hiragana = hiragana.clone();
 
-                    ipc_service.set_candidates(candidates.texts.clone())?;
-                    ipc_service.set_selection(selection_index as i32)?;
+                    require_ipc!()?.set_candidates(candidates.texts.clone())?;
+                    require_ipc!()?.set_selection(selection_index as i32)?;
                     self.update_pos()?;
 
                     transition = CompositionState::Composing;

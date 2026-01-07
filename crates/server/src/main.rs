@@ -10,6 +10,7 @@ use shared::proto::{
 };
 
 use std::ffi::{c_char, c_int, CStr, CString};
+use std::process::Command;
 
 const USE_ZENZAI: bool = true;
 
@@ -251,6 +252,19 @@ impl AzookeyService for MyAzookeyService {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("AzookeyServer started");
+
+    // Kill existing server to allow clean restart
+    let current_pid = std::process::id();
+    let kill_result = Command::new("taskkill")
+        .args(["/F", "/IM", "azookey-server.exe", "/FI", &format!("PID ne {}", current_pid)])
+        .output();
+    if let Ok(output) = &kill_result {
+        if output.status.success() {
+            println!("Killed existing server process, waiting for pipe release...");
+            // Wait longer to ensure Windows fully releases the named pipe
+            std::thread::sleep(std::time::Duration::from_millis(2000));
+        }
+    }
     // get executable directory
     let current_exe = std::env::current_exe()?;
     let parent_dir = current_exe.parent().unwrap();
@@ -258,9 +272,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let service = MyAzookeyService::default();
 
-    println!("AzookeyServer listening");
+    println!("AzookeyServer creating named pipe...");
 
-    Server::builder()
+    let result = Server::builder()
         .add_service(AzookeyServiceServer::new(service))
         .add_service(
             ReflectionBuilder::configure()
@@ -269,7 +283,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap(),
         )
         .serve_with_incoming(TonicNamedPipeServer::new("azookey_server"))
-        .await?;
+        .await;
+
+    match &result {
+        Ok(_) => println!("AzookeyServer stopped normally"),
+        Err(e) => println!("AzookeyServer error: {:?}", e),
+    }
+
+    result?;
 
     Ok(())
 }

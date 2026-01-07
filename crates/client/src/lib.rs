@@ -43,9 +43,8 @@ pub extern "system" fn DllMain(
         })();
 
         // use unwrap only in this function
-        std::thread::spawn(|| {
-            trace::setup_logger().unwrap();
-        });
+        // Setup logger synchronously to capture all logs from the start
+        let _ = trace::setup_logger();
 
         tracing::debug!("DllMain");
 
