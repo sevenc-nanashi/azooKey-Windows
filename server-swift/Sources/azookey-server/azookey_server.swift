@@ -9,14 +9,78 @@ import ffi
 @MainActor var execURL = URL(filePath: "")
 @MainActor var logFileHandle: FileHandle?
 
+// MARK: - Reusable FFI Buffers (to prevent memory leaks)
+// These buffers are reused across calls instead of allocating new memory each time
+// Using raw UnsafeMutablePointer for stable memory addresses (Swift Arrays can move)
+
+// Buffer for simple string returns (max 1KB should be plenty for composing text)
+let stringBufferSize = 1024
+@MainActor var stringBuffer: UnsafeMutablePointer<CChar> = .allocate(capacity: stringBufferSize)
+
+// Buffers for candidate list (max 100 candidates, each with 3 strings of max 256 chars)
+let maxCandidates = 100
+let maxStringLen = 256
+
+// Raw pointer arrays for stable memory addresses
+@MainActor var candidateTextBuffers: [UnsafeMutablePointer<CChar>] = []
+@MainActor var candidateSubtextBuffers: [UnsafeMutablePointer<CChar>] = []
+@MainActor var candidateHiraganaBuffers: [UnsafeMutablePointer<CChar>] = []
+@MainActor var candidatePtrs: [UnsafeMutablePointer<FFICandidate>] = []
+@MainActor var candidatePtrArray: UnsafeMutablePointer<UnsafeMutablePointer<FFICandidate>?>? = nil
+@MainActor var buffersInitialized = false
+
+// Helper to copy string to buffer safely
+@MainActor func copyToBuffer(_ str: String, buffer: UnsafeMutablePointer<CChar>, maxLen: Int) {
+    let cString = str.utf8CString
+    let copyLen = min(cString.count, maxLen - 1)
+    for i in 0..<copyLen {
+        buffer[i] = cString[i]
+    }
+    buffer[copyLen] = 0 // null terminate
+}
+
+// Initialize all candidate buffers once with stable raw pointers
+@MainActor func initCandidateBuffers() {
+    guard !buffersInitialized else { return }
+    buffersInitialized = true
+
+    candidatePtrArray = .allocate(capacity: maxCandidates)
+
+    for i in 0..<maxCandidates {
+        // Allocate stable string buffers
+        let textBuf = UnsafeMutablePointer<CChar>.allocate(capacity: maxStringLen)
+        let subtextBuf = UnsafeMutablePointer<CChar>.allocate(capacity: maxStringLen)
+        let hiraganaBuf = UnsafeMutablePointer<CChar>.allocate(capacity: maxStringLen)
+
+        // Initialize to empty strings
+        textBuf[0] = 0
+        subtextBuf[0] = 0
+        hiraganaBuf[0] = 0
+
+        candidateTextBuffers.append(textBuf)
+        candidateSubtextBuffers.append(subtextBuf)
+        candidateHiraganaBuffers.append(hiraganaBuf)
+
+        // Allocate candidate struct
+        let candidatePtr = UnsafeMutablePointer<FFICandidate>.allocate(capacity: 1)
+        candidatePtr.pointee = FFICandidate(text: textBuf, subtext: subtextBuf, hiragana: hiraganaBuf, correspondingCount: 0)
+        candidatePtrs.append(candidatePtr)
+        candidatePtrArray![i] = candidatePtr
+    }
+}
+
+// Set to true to enable debug logging (causes slowdown)
+let DEBUG_LOGGING_ENABLED = false
+
 @MainActor func debugLog(_ message: String) {
+    guard DEBUG_LOGGING_ENABLED else { return }
     let logMessage = "[\(Date())] \(message)\n"
     print(logMessage, terminator: "")
 
     // Also write to file
     if let data = logMessage.data(using: .utf8) {
         logFileHandle?.write(data)
-        try? logFileHandle?.synchronize()
+        // Removed synchronize() - was causing major slowdown
     }
 }
 
@@ -33,7 +97,18 @@ import ffi
 // User dictionary entries: [reading: [words]]
 @MainActor var userDictionary: [String: [String]] = [:]
 
+// Cache for ConvertRequestOptions to avoid recreating on every keystroke
+@MainActor var cachedOptions: ConvertRequestOptions?
+@MainActor var cachedTextReplacer: TextReplacer?
+
 @MainActor func getOptions(context: String = "") -> ConvertRequestOptions {
+    // Create TextReplacer only once
+    if cachedTextReplacer == nil {
+        cachedTextReplacer = .init {
+            return execURL.appendingPathComponent("EmojiDictionary").appendingPathComponent("emoji_all_E15.1.txt")
+        }
+    }
+
     return ConvertRequestOptions(
         requireJapanesePrediction: true,
         requireEnglishPrediction: false,
@@ -41,9 +116,7 @@ import ffi
         learningType: .nothing,
         memoryDirectoryURL: URL(filePath: "./test"),
         sharedContainerURL: URL(filePath: "./test"),
-        textReplacer: .init {
-            return execURL.appendingPathComponent("EmojiDictionary").appendingPathComponent("emoji_all_E15.1.txt")
-        },
+        textReplacer: cachedTextReplacer!,
         specialCandidateProviders: nil,
         // zenzai
         zenzaiMode: config["enable"] as! Bool ? .on(
@@ -235,8 +308,9 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
     let inputString = String(cString: input)
     composingText.insertAtCursorPosition(inputString, inputStyle: .roman2kana)
 
-    cursorPtr.pointee = composingText.convertTargetCursorPosition    
-    return _strdup(composingText.convertTarget)!
+    cursorPtr.pointee = composingText.convertTargetCursorPosition
+    copyToBuffer(composingText.convertTarget, buffer: stringBuffer, maxLen: stringBufferSize)
+    return stringBuffer
 }
 
 @_silgen_name("RemoveText")
@@ -246,7 +320,8 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
     composingText.deleteBackwardFromCursorPosition(count: 1)
 
     cursorPtr.pointee = composingText.convertTargetCursorPosition
-    return _strdup(composingText.convertTarget)!
+    copyToBuffer(composingText.convertTarget, buffer: stringBuffer, maxLen: stringBufferSize)
+    return stringBuffer
 }
 
 @_silgen_name("MoveCursor")
@@ -258,46 +333,76 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
     print("offset: \(offset), cursor: \(cursor)")
 
     cursorPtr.pointee = cursor
-    return _strdup(composingText.convertTarget)!
+    copyToBuffer(composingText.convertTarget, buffer: stringBuffer, maxLen: stringBufferSize)
+    return stringBuffer
 }
 
 @_silgen_name("ClearText")
 @MainActor public func clear_text() {
+    print("[CLEAR] Clearing all text and calling stopComposition()")
     composingText = ComposingText()
+    // Reset converter internal state to prevent slowdown from accumulated caches
+    converter.stopComposition()
 }
 
-func to_list_pointer(_ list: [FFICandidate]) -> UnsafeMutablePointer<UnsafeMutablePointer<FFICandidate>?> {
-    let pointer = UnsafeMutablePointer<UnsafeMutablePointer<FFICandidate>?>.allocate(capacity: list.count)
-    for (i, item) in list.enumerated() {
-        pointer[i] = UnsafeMutablePointer<FFICandidate>.allocate(capacity: 1)
-        pointer[i]?.pointee = item
-    }
-    return pointer
-}
+// Track conversion times for performance debugging
+@MainActor var conversionCount = 0
+@MainActor var totalConversionTime: Double = 0
 
 @_silgen_name("GetComposedText")
 @MainActor public func get_composed_text(lengthPtr: UnsafeMutablePointer<Int>) -> UnsafeMutablePointer<UnsafeMutablePointer<FFICandidate>?> {
+    // Initialize buffers on first call
+    initCandidateBuffers()
+
     let hiragana = composingText.convertTarget
     debugLog("GetComposedText called, hiragana: '\(hiragana)'")
     let contextString = (config["context"] as? String) ?? ""
     let options = getOptions(context: contextString)
+
+    // Time the conversion for performance debugging
+    let startTime = Date()
     let converted = converter.requestCandidates(composingText, options: options)
-    debugLog("mainResults count: \(converted.mainResults.count)")
-    // Show ALL candidates to find kanji
-    for (idx, candidate) in converted.mainResults.prefix(5).enumerated() {
-        debugLog("Candidate[\(idx)]: text='\(candidate.text)'")
+    let elapsed = Date().timeIntervalSince(startTime) * 1000  // ms
+
+    conversionCount += 1
+    totalConversionTime += elapsed
+
+    // Log timing to file for analysis
+    let perfLog = "[PERF] Conv #\(conversionCount): \(String(format: "%.1f", elapsed))ms, avg: \(String(format: "%.1f", totalConversionTime / Double(conversionCount)))ms, len: \(hiragana.count)\n"
+    if let data = perfLog.data(using: .utf8) {
+        let perfPath = URL(filePath: "G:/Projects/azooKey-Windows/perf.log")
+        if let handle = try? FileHandle(forWritingTo: perfPath) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            handle.closeFile()
+        } else {
+            FileManager.default.createFile(atPath: perfPath.path, contents: data)
+        }
     }
-    var result: [FFICandidate] = []
+
+    debugLog("mainResults count: \(converted.mainResults.count)")
+
+    var candidateIndex = 0
+
+    // Helper to add a candidate using reusable buffers (stable raw pointers)
+    func addCandidate(text: String, subtext: String, reading: String, count: Int32) {
+        guard candidateIndex < maxCandidates else { return }
+
+        // Copy strings to pre-allocated stable buffers
+        copyToBuffer(text, buffer: candidateTextBuffers[candidateIndex], maxLen: maxStringLen)
+        copyToBuffer(subtext, buffer: candidateSubtextBuffers[candidateIndex], maxLen: maxStringLen)
+        copyToBuffer(reading, buffer: candidateHiraganaBuffers[candidateIndex], maxLen: maxStringLen)
+
+        // Update only the correspondingCount (pointers are already set during init)
+        candidatePtrs[candidateIndex].pointee.correspondingCount = count
+
+        candidateIndex += 1
+    }
 
     // Add user dictionary entries first (if hiragana matches a reading)
     if let userWords = userDictionary[hiragana] {
         for word in userWords {
-            let text = strdup(word)
-            let hiraganaPtr = strdup(hiragana)
-            let correspondingCount = Int32(hiragana.count)
-            let subtext = strdup("")
-
-            result.append(FFICandidate(text: text, subtext: subtext, hiragana: hiraganaPtr, correspondingCount: correspondingCount))
+            addCandidate(text: word, subtext: "", reading: hiragana, count: Int32(hiragana.count))
         }
     }
 
@@ -305,14 +410,8 @@ func to_list_pointer(_ list: [FFICandidate]) -> UnsafeMutablePointer<UnsafeMutab
     for (reading, words) in userDictionary {
         if hiragana.hasPrefix(reading) && reading != hiragana {
             for word in words {
-                let text = strdup(word)
-                let hiraganaPtr = strdup(reading)
-                let correspondingCount = Int32(reading.count)
-                // Calculate remaining text after this reading
                 let remaining = String(hiragana.dropFirst(reading.count))
-                let subtext = strdup(remaining)
-
-                result.append(FFICandidate(text: text, subtext: subtext, hiragana: hiraganaPtr, correspondingCount: correspondingCount))
+                addCandidate(text: word, subtext: remaining, reading: reading, count: Int32(reading.count))
             }
         }
     }
@@ -379,32 +478,25 @@ func to_list_pointer(_ list: [FFICandidate]) -> UnsafeMutablePointer<UnsafeMutab
         }
 
         for dateStr in dateStrings {
-            result.append(FFICandidate(
-                text: strdup(dateStr),
-                subtext: strdup(""),
-                hiragana: strdup(hiragana),
-                correspondingCount: Int32(hiragana.count)
-            ))
+            addCandidate(text: dateStr, subtext: "", reading: hiragana, count: Int32(hiragana.count))
         }
     }
 
     for i in 0..<converted.mainResults.count {
         let candidate = converted.mainResults[i]
-
-        let text = strdup(constructCandidateString(candidate: candidate, hiragana: hiragana))
-        let hiragana = strdup(hiragana)
+        let text = constructCandidateString(candidate: candidate, hiragana: hiragana)
         let composingCount = candidate.composingCount
 
         var afterComposingText = composingText
         afterComposingText.prefixComplete(composingCount: composingCount)
-        let subtext = strdup(afterComposingText.convertTarget)
+        let subtext = afterComposingText.convertTarget
 
-        result.append(FFICandidate(text: text, subtext: subtext, hiragana: hiragana, correspondingCount: Int32(getInputCount(composingCount))))
+        addCandidate(text: text, subtext: subtext, reading: hiragana, count: Int32(getInputCount(composingCount)))
     }
 
-    lengthPtr.pointee = result.count
+    lengthPtr.pointee = candidateIndex
 
-    return to_list_pointer(result)
+    return candidatePtrArray!
 }
 
 @_silgen_name("ShrinkText")
@@ -415,7 +507,12 @@ func to_list_pointer(_ list: [FFICandidate]) -> UnsafeMutablePointer<UnsafeMutab
     afterComposingText.prefixComplete(composingCount: .inputCount(Int(offset)))
     composingText = afterComposingText
 
-    return _strdup(composingText.convertTarget)!
+    // Reset converter state when text is confirmed
+    print("[SHRINK] offset=\(offset), remaining='\(composingText.convertTarget)', calling stopComposition()")
+    converter.stopComposition()
+
+    copyToBuffer(composingText.convertTarget, buffer: stringBuffer, maxLen: stringBufferSize)
+    return stringBuffer
 }
 
 @_silgen_name("SetContext")
@@ -424,4 +521,34 @@ func to_list_pointer(_ list: [FFICandidate]) -> UnsafeMutablePointer<UnsafeMutab
 ) {
     let contextString = String(cString: context)
     config["context"] = contextString
+}
+
+// MARK: - FFI Memory Deallocation Functions
+// These functions allow Rust to properly free memory allocated by Swift
+
+@_silgen_name("FreeString")
+public func free_string(ptr: UnsafeMutablePointer<CChar>?) {
+    // strdup/_strdup uses C's malloc, so we use free()
+    ptr?.deallocate()
+}
+
+@_silgen_name("FreeComposedTextResult")
+public func free_composed_text_result(
+    result: UnsafeMutablePointer<UnsafeMutablePointer<FFICandidate>?>?,
+    length: Int
+) {
+    guard let result = result else { return }
+
+    for i in 0..<length {
+        if let candidatePtr = result[i] {
+            // Free strdup'd strings using free() since strdup uses malloc
+            free(candidatePtr.pointee.text)
+            free(candidatePtr.pointee.subtext)
+            free(candidatePtr.pointee.hiragana)
+            // Free the FFICandidate pointer
+            candidatePtr.deallocate()
+        }
+    }
+    // Free the outer array
+    result.deallocate()
 }

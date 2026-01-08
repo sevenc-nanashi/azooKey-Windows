@@ -25,11 +25,13 @@ impl<'a> Visit for StringVisitor<'a> {
 }
 
 pub fn setup_logger() -> anyhow::Result<()> {
-    // Temporarily enable logging in release builds to debug IME crash
-    // #[cfg(not(debug_assertions))]
-    // {
-    //     return Ok(());
-    // }
+    // Disable tracing in release builds - it causes progressive slowdown
+    // because tracing_chrome rewrites the entire file on every event (O(n²))
+    #[cfg(not(debug_assertions))]
+    {
+        return Ok(());
+    }
+    #[allow(unreachable_code)]
     let timestamp = chrono::Local::now().format("%Y-%m-%d-%H.%M.%S");
     let path = format!("{}/{}.json", LOG_FOLDER, timestamp);
 

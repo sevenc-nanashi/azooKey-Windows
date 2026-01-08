@@ -1,5 +1,4 @@
 use std::cmp::{max, min};
-use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,15 +23,16 @@ fn mark_ipc_reconnect_failed() {
     LAST_IPC_FAIL_TIME.store(now, Ordering::Relaxed);
 }
 
-// Debug helper - write to file since println doesn't work in DLLs
-fn debug_log(msg: &str) {
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("G:/Projects/azooKey-Windows/logs/debug.log")
-    {
-        let _ = writeln!(file, "[{}] {}", chrono::Local::now().format("%H:%M:%S%.3f"), msg);
-    }
+// Debug helper - DISABLED to prevent slowdown from file I/O on every keystroke
+fn debug_log(_msg: &str) {
+    // Disabled - was causing progressive slowdown due to file writes
+    // if let Ok(mut file) = std::fs::OpenOptions::new()
+    //     .create(true)
+    //     .append(true)
+    //     .open("G:/Projects/azooKey-Windows/logs/debug.log")
+    // {
+    //     let _ = writeln!(file, "[{}] {}", chrono::Local::now().format("%H:%M:%S%.3f"), msg);
+    // }
 }
 
 use crate::{
