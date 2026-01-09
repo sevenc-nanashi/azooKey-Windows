@@ -462,10 +462,11 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
             let month = cal.component(.month, from: now)
             let day = cal.component(.day, from: now)
             let weekday = weekdays[cal.component(.weekday, from: now)]
-            dateStrings.append("\(year)年\(month)月\(day)日")
+            dateStrings.append("\(year)\(String(format: "%02d", month))\(String(format: "%02d", day))")
             dateStrings.append("\(month)月\(day)日(\(weekday))")
-            dateStrings.append("\(year)年\(month)月\(day)日(\(weekday))")
             dateStrings.append("\(year)/\(String(format: "%02d", month))/\(String(format: "%02d", day))")
+            dateStrings.append("\(year)年\(month)月\(day)日")
+            dateStrings.append("\(year)年\(month)月\(day)日(\(weekday))")
             dateStrings.append("\(month)月\(day)日")
         case "あした":
             if let tomorrow = cal.date(byAdding: .day, value: 1, to: now) {
@@ -473,10 +474,11 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
                 let month = cal.component(.month, from: tomorrow)
                 let day = cal.component(.day, from: tomorrow)
                 let weekday = weekdays[cal.component(.weekday, from: tomorrow)]
-                dateStrings.append("\(year)年\(month)月\(day)日")
+                dateStrings.append("\(year)\(String(format: "%02d", month))\(String(format: "%02d", day))")
                 dateStrings.append("\(month)月\(day)日(\(weekday))")
-                dateStrings.append("\(year)年\(month)月\(day)日(\(weekday))")
                 dateStrings.append("\(year)/\(String(format: "%02d", month))/\(String(format: "%02d", day))")
+                dateStrings.append("\(year)年\(month)月\(day)日")
+                dateStrings.append("\(year)年\(month)月\(day)日(\(weekday))")
                 dateStrings.append("\(month)月\(day)日")
             }
         case "きのう":
@@ -485,10 +487,11 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
                 let month = cal.component(.month, from: yesterday)
                 let day = cal.component(.day, from: yesterday)
                 let weekday = weekdays[cal.component(.weekday, from: yesterday)]
-                dateStrings.append("\(year)年\(month)月\(day)日")
+                dateStrings.append("\(year)\(String(format: "%02d", month))\(String(format: "%02d", day))")
                 dateStrings.append("\(month)月\(day)日(\(weekday))")
-                dateStrings.append("\(year)年\(month)月\(day)日(\(weekday))")
                 dateStrings.append("\(year)/\(String(format: "%02d", month))/\(String(format: "%02d", day))")
+                dateStrings.append("\(year)年\(month)月\(day)日")
+                dateStrings.append("\(year)年\(month)月\(day)日(\(weekday))")
                 dateStrings.append("\(month)月\(day)日")
             }
         case "いま":
