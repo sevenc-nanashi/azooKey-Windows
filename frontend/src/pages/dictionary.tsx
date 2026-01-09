@@ -49,10 +49,10 @@ export const Dictionary = () => {
             return;
         }
 
-        // Validate reading is hiragana
-        const hiraganaRegex = /^[\u3040-\u309F]+$/;
+        // Validate reading is hiragana (also allow prolonged sound mark ー)
+        const hiraganaRegex = /^[\u3040-\u309F\u30FC]+$/;
         if (!hiraganaRegex.test(newReading)) {
-            toast("読みはひらがなで入力してください");
+            toast("読みはひらがなで入力してください（長音「ー」も使用可）");
             return;
         }
 
