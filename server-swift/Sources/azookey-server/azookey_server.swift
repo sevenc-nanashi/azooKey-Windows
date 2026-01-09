@@ -77,6 +77,8 @@ let maxStringLen = 256
 
 // Set to true to enable debug logging (causes slowdown)
 let DEBUG_LOGGING_ENABLED = false
+// Set to true to enable performance logging to perf.log
+let PERF_LOGGING_ENABLED = false
 
 @MainActor func debugLog(_ message: String) {
     guard DEBUG_LOGGING_ENABLED else { return }
@@ -231,7 +233,9 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
     path: UnsafePointer<CChar>,
     use_zenzai: Bool
 ) {
-    initLogFile()
+    if DEBUG_LOGGING_ENABLED {
+        initLogFile()
+    }
     let path = String(cString: path)
     execURL = URL(filePath: path)
     debugLog("Initialize called, path: \(path)")
@@ -395,15 +399,17 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
     totalConversionTime += elapsed
 
     // Log timing to file for analysis
-    let perfLog = "[PERF] Conv #\(conversionCount): \(String(format: "%.1f", elapsed))ms, avg: \(String(format: "%.1f", totalConversionTime / Double(conversionCount)))ms, len: \(hiragana.count)\n"
-    if let data = perfLog.data(using: .utf8) {
-        let perfPath = URL(filePath: "G:/Projects/azooKey-Windows/perf.log")
-        if let handle = try? FileHandle(forWritingTo: perfPath) {
-            handle.seekToEndOfFile()
-            handle.write(data)
-            handle.closeFile()
-        } else {
-            FileManager.default.createFile(atPath: perfPath.path, contents: data)
+    if PERF_LOGGING_ENABLED {
+        let perfLog = "[PERF] Conv #\(conversionCount): \(String(format: "%.1f", elapsed))ms, avg: \(String(format: "%.1f", totalConversionTime / Double(conversionCount)))ms, len: \(hiragana.count)\n"
+        if let data = perfLog.data(using: .utf8) {
+            let perfPath = URL(filePath: "G:/Projects/azooKey-Windows/perf.log")
+            if let handle = try? FileHandle(forWritingTo: perfPath) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                handle.closeFile()
+            } else {
+                FileManager.default.createFile(atPath: perfPath.path, contents: data)
+            }
         }
     }
 

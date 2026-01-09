@@ -2,6 +2,8 @@ target
 build
 scripts/*.exe
 logs/*
+perf.log
+swift_debug.log
 .idea
 
 *.gguf
