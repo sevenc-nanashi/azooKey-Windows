@@ -463,6 +463,13 @@ impl TextServiceFactory {
                     try_ipc!(|ipc: &mut IPCService| ipc.show_window());
                 }
                 ClientAction::EndComposition => {
+                    // Learn the selected candidate if there was a valid selection
+                    if !candidates.texts.is_empty()
+                        && (selection_index as usize) < candidates.texts.len()
+                        && !preview.is_empty() {
+                        try_ipc!(|ipc: &mut IPCService| ipc.learn_candidate(selection_index));
+                    }
+
                     self.end_composition()?;
                     selection_index = 0;
                     corresponding_count = 0;
@@ -617,6 +624,8 @@ impl TextServiceFactory {
                         .skip(corresponding_count as usize)
                         .collect();
 
+                    // Learn the selected candidate before shrinking
+                    let _ = require_ipc!()?.learn_candidate(selection_index);
                     require_ipc!()?.shrink_text(corresponding_count.clone())?;
                     let text = match mode {
                         InputMode::Kana => to_fullwidth(text, false),

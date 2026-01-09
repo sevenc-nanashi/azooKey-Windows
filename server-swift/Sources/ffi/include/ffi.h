@@ -11,3 +11,7 @@ struct FFICandidate {
     char *hiragana;
     int correspondingCount;
 };
+
+// History learning functions
+void LearnCandidate(int candidateIndex);
+void ResetLearningMemory(void);

@@ -9,6 +9,12 @@ import ffi
 @MainActor var execURL = URL(filePath: "")
 @MainActor var logFileHandle: FileHandle?
 
+// Memory directory for learning data
+@MainActor var memoryURL: URL!
+
+// Store last conversion result for learning
+@MainActor var lastConversionResult: [Candidate] = []
+
 // MARK: - Reusable FFI Buffers (to prevent memory leaks)
 // These buffers are reused across calls instead of allocating new memory each time
 // Using raw UnsafeMutablePointer for stable memory addresses (Swift Arrays can move)
@@ -113,9 +119,10 @@ let DEBUG_LOGGING_ENABLED = false
         requireJapanesePrediction: true,
         requireEnglishPrediction: false,
         keyboardLanguage: .ja_JP,
-        learningType: .nothing,
-        memoryDirectoryURL: URL(filePath: "./test"),
-        sharedContainerURL: URL(filePath: "./test"),
+        learningType: .inputAndOutput,
+        maxMemoryCount: 65536,
+        memoryDirectoryURL: memoryURL,
+        sharedContainerURL: memoryURL,
         textReplacer: cachedTextReplacer!,
         specialCandidateProviders: nil,
         // zenzai
@@ -228,6 +235,26 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
     let path = String(cString: path)
     execURL = URL(filePath: path)
     debugLog("Initialize called, path: \(path)")
+
+    // Set up memory directory for learning data
+    if let appDataPath = ProcessInfo.processInfo.environment["APPDATA"] {
+        memoryURL = URL(filePath: appDataPath)
+            .appendingPathComponent("Azookey")
+            .appendingPathComponent("memory")
+        // Create directory if needed
+        try? FileManager.default.createDirectory(
+            at: memoryURL,
+            withIntermediateDirectories: true
+        )
+        print("Memory directory: \(memoryURL.path)")
+    } else {
+        // Fallback to local directory
+        memoryURL = execURL.appendingPathComponent("memory")
+        try? FileManager.default.createDirectory(
+            at: memoryURL,
+            withIntermediateDirectories: true
+        )
+    }
 
     load_config()
 
@@ -381,6 +408,9 @@ func constructCandidateString(candidate: Candidate, hiragana: String) -> String 
     }
 
     debugLog("mainResults count: \(converted.mainResults.count)")
+
+    // Store conversion result for learning
+    lastConversionResult = converted.mainResults
 
     var candidateIndex = 0
 
@@ -551,4 +581,32 @@ public func free_composed_text_result(
     }
     // Free the outer array
     result.deallocate()
+}
+
+// MARK: - History Learning Functions
+
+@_silgen_name("LearnCandidate")
+@MainActor public func learn_candidate(candidateIndex: Int32) {
+    // Validate index
+    guard candidateIndex >= 0,
+          Int(candidateIndex) < lastConversionResult.count else {
+        print("[LEARN] Invalid candidate index: \(candidateIndex), available: \(lastConversionResult.count)")
+        return
+    }
+
+    let candidate = lastConversionResult[Int(candidateIndex)]
+    print("[LEARN] Learning candidate[\(candidateIndex)]: '\(candidate.text)'")
+
+    // Update learning data
+    converter.setCompletedData(candidate)
+    converter.updateLearningData(candidate)
+    converter.commitUpdateLearningData()
+
+    print("[LEARN] Learning committed successfully")
+}
+
+@_silgen_name("ResetLearningMemory")
+@MainActor public func reset_learning_memory() {
+    print("[LEARN] Resetting all learning memory")
+    converter.resetMemory()
 }

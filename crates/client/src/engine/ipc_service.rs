@@ -258,6 +258,17 @@ impl IPCService {
 
         Ok(())
     }
+
+    #[tracing::instrument]
+    pub fn learn_candidate(&mut self, candidate_index: i32) -> anyhow::Result<()> {
+        let request = tonic::Request::new(shared::proto::LearnCandidateRequest { candidate_index });
+        let _response = self
+            .runtime
+            .clone()
+            .block_on(self.azookey_client.learn_candidate(request))?;
+
+        Ok(())
+    }
 }
 
 // implement methods to interact with candidate window server

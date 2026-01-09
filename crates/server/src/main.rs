@@ -38,6 +38,7 @@ unsafe extern "C" {
     fn ClearText();
     fn GetComposedText(lengthPtr: *mut c_int) -> *mut *mut FFICandidate;
     fn LoadConfig();
+    fn LearnCandidate(candidateIndex: c_int);
 }
 
 fn initialize(path: &str) {
@@ -246,6 +247,15 @@ impl AzookeyService for MyAzookeyService {
     ) -> Result<Response<shared::proto::UpdateConfigResponse>, Status> {
         unsafe { LoadConfig() };
         Ok(Response::new(shared::proto::UpdateConfigResponse {}))
+    }
+
+    async fn learn_candidate(
+        &self,
+        request: Request<shared::proto::LearnCandidateRequest>,
+    ) -> Result<Response<shared::proto::LearnCandidateResponse>, Status> {
+        let candidate_index = request.into_inner().candidate_index;
+        unsafe { LearnCandidate(candidate_index) };
+        Ok(Response::new(shared::proto::LearnCandidateResponse {}))
     }
 }
 

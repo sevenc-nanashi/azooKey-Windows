@@ -66,6 +66,14 @@ message SetContextResponse {}
 message UpdateConfigRequest {}
 message UpdateConfigResponse {}
 
+// Request message for LearnCandidate - records user's selection for history learning
+message LearnCandidateRequest {
+  int32 candidate_index = 1;
+}
+
+// Response message for LearnCandidate
+message LearnCandidateResponse {}
+
 
 // Service definition for text editing operations.
 service AzookeyService {
@@ -76,4 +84,5 @@ service AzookeyService {
   rpc ClearText (ClearTextRequest) returns (ClearTextResponse);
   rpc SetContext (SetContextRequest) returns (SetContextResponse);
   rpc UpdateConfig (UpdateConfigRequest) returns (UpdateConfigResponse);
+  rpc LearnCandidate (LearnCandidateRequest) returns (LearnCandidateResponse);
 }
