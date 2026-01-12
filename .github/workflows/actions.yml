@@ -20,8 +20,8 @@ jobs:
     - name: Install Swift
       uses: compnerd/gha-setup-swift@main
       with:
-        branch: swift-6.0.2-release
-        tag: 6.0.2-RELEASE
+        branch: swift-6.1.0-release
+        tag: 6.1.0-RELEASE
 
     - name: Fix swift sdk
       shell: pwsh
